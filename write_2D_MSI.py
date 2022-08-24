@@ -18,10 +18,8 @@ import matplotlib.pyplot as plt
 
 
 def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turbo_factor=4,
-                 slice_locations=[0],N_bins=19,bin_width=800,t_ex=2.5e-3,t_ref=2e-3,randomize_bin=False,
-                 use_sigpy_180=False, rfbw_factor=1,undersampling_pattern=None):
-
-
+                 slice_locations=[0],N_bins=19,bin_width=800.0,t_ex=2.5e-3,t_ref=2e-3,randomize_bin=False,
+                 use_sigpy_180=False, rfbw_factor=1,undersampling_pattern=None, bin_order_center_out=True):
 
     # Generate a 2D-MSI sequence using Pypulseq
     # Sequence TSE-based
@@ -65,11 +63,9 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
     gs_ex = make_trapezoid(channel=ch_ss, system=system, amplitude= -g_ss.amplitude, flat_time=t_exwd,
                            rise_time=ramp_time)# Note that the 90-deg SS gradient's amplitude is reversed for 2D MSI purposes!!
 
-
     ### 180 deg pulse (+x')
     rf_ref_phase = 0
     flip_ref = fa_ref * np.pi / 180
-
 
     if use_sigpy_180:
         tb = 2
@@ -233,7 +229,10 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
     bin_centers = bin_width*(np.arange(N_bins)-(N_bins-1)/2)
     if randomize_bin:
         np.random.shuffle(bin_centers)
-
+    if bin_order_center_out:
+        print(f'Bin centers: {bin_centers}')
+        bin_centers = reorder_to_center_out(bin_centers)
+        print(f'Bin centers, reordered: {bin_centers}')
 
     # Add building blocks to sequence
     for q in range(N_bins):
@@ -498,6 +497,9 @@ def write_2D_MSI_informed(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=
                     #print(q, t_sp)
                     gp_pre = make_trapezoid(channel=ch_pe, system=system, area=phase_area, duration=t_sp,
                                             rise_time=ramp_time)
+
+                    print(f'Phase area is {phase_area}')
+
                     gp_rew = make_trapezoid(channel=ch_pe, system=system, area=-phase_area, duration=t_sp,
                                             rise_time=ramp_time)
                     seq.add_block(gs4, rf_ref_bin)
@@ -549,18 +551,34 @@ def calculate_MSI_rf_params(z0,dz,f0,df):
 
     return offset_90, offset_180
 
+def reorder_to_center_out(offsets):
+    offsets_reordered = np.zeros(len(offsets),dtype=int)
+    Nb = len(offsets)
+    if Nb%2 == 0:
+        neg = offsets[0:Nb/2]
+        pos = offsets[Nb/2:]
+    else:
+        mid_ind = int(np.floor(Nb/2))
+        offsets_reordered[0] = offsets[int(np.floor(Nb/2))]
+        neg = offsets[0:mid_ind]
+        pos = offsets[mid_ind+1:]
+
+    neg = np.flip(neg)
+    offsets_reordered[1:] = [val for pair in zip(neg,pos) for val in pair]
+    return offsets_reordered
+
 
 if __name__ == '__main__':
     # ACR Slice locations (for default, set slice_locations to None)
-    n_slices = 11
-    thk = 5e-3
-    gap = 5e-3
-    L = (n_slices - 1) * (thk + gap)
-    displacement = 0 # change this
-    acr_sl_locs = displacement + np.arange(-L / 2, L / 2 + thk + gap, thk + gap)
+    # n_slices = 11
+    # thk = 5e-3
+    # gap = 5e-3
+    # L = (n_slices - 1) * (thk + gap)
+    # displacement = 0 # change this
+    # acr_sl_locs = displacement + np.arange(-L / 2, L / 2 + thk + gap, thk + gap)
     #print(acr_sl_locs)
 
-    sl_locs = acr_sl_locs[0:-1:2]
+    #sl_locs = acr_sl_locs[0:-1:2]
     #
     # # Set up same as 2nd exp. of last time
     # N_bins = 9
@@ -597,35 +615,54 @@ if __name__ == '__main__':
     # #print(seq.test_report())
     # seq.write(f'msi2d_042722_scheme{sch}.seq')
 
-# Make sequence
+# Make sequence\
+
+
+    BW_total = 7200
     N_bins = 9
+    bin_width = BW_total / N_bins
+
     thk = 5e-3
-    TR = 2
+    TR = 2000e-3
     TE = 13e-3
-    FOV = 0.1218
-    N = 256
-    bin_width = 2400/9
+    FOV = 128e-3
+    N = 128
     dur_factor = 1
     tf = 16
     bwf = 1
     randbin = False
 
     # Load undersampling pattern
-
-    for sigma in [0.05,0.15,0.25,0.35,0.55,0.75]:
-        mask = loadmat(f'./undersampling/cs_sigma_{sigma}.mat')['mask']
-        print(f'{sigma}')
+    for R in [2,3,4]:
+        mask = loadmat(f'./undersampling/optimized_us_mask_R={R}.mat')['pe_mask']
+        print(f'Making undersampling factor R={R} MSI sequence......')
         usp = np.sum(mask,axis=0)/256
 
-        seq, bin_centers, pe_info = write_2D_MSI(N=N,FOV=FOV,enc='xyz',TR=TR,TE=TE,thk=thk,turbo_factor=tf,slice_locations=sl_locs,
+        seq, bin_centers, pe_info = write_2D_MSI(N=N,FOV=FOV,enc='xyz',TR=TR,TE=TE,thk=thk,turbo_factor=tf,slice_locations=[0],
                            N_bins=N_bins,bin_width=bin_width,t_ex=dur_factor*2.5e-3, t_ref=dur_factor*2e-3,
                                         randomize_bin=False,use_sigpy_180=False, rfbw_factor=bwf,
-                                        undersampling_pattern=None)
-        print(f"Done with sigma={sigma}")
+                                        undersampling_pattern=usp, bin_order_center_out=True)
+        print(f"Done with R={R}")
         # Check sequence
         print(seq.test_report())
         # Plot
-        #seq.plot(time_range=[0,TR])
-        #print(pe_info['order'])
+        seq.plot(time_range=[0,TR])
+        print(pe_info['order'])
         # Save
-        #seq.write(f'2D_MSI_for_power_sigma{sigma}.seq')
+        seq.write(f'2D_CS_MSI_R={R}_AUG2022_TotalBW7200Hz.seq')
+        savemat(f'2D_CS_MSI_R={R}_info.mat',{'bin_centers': bin_centers, 'pe_order': pe_info['order'],'pe_dims':pe_info['dims']})
+
+
+
+    # # Wide BW probe
+    # seq, bin_centers, pe_info = write_2D_MSI(N=128, FOV=0.128, enc='xyz', TR=2000e-3, TE=13e-3, thk=5e-3, turbo_factor=16,
+    #                                          slice_locations=[0],
+    #                                          N_bins=19, bin_width=15200/19, t_ex=dur_factor * 2.5e-3,
+    #                                          t_ref=dur_factor * 2e-3,
+    #                                          randomize_bin=False, use_sigpy_180=False, rfbw_factor=bwf,
+    #                                          undersampling_pattern=None, bin_order_center_out=True)
+    #
+    # print(seq.test_report())
+    # print(pe_info['order'])
+    # seq.write('2D_MSI_wide_BW_19bins_N128_Aug2022.seq')
+    # savemat('n128_pe_order.mat',pe_info)
