@@ -19,7 +19,9 @@ import matplotlib.pyplot as plt
 
 def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turbo_factor=4,
                  slice_locations=[0],N_bins=19,bin_width=800.0,t_ex=2.5e-3,t_ref=2e-3,randomize_bin=False,
-                 use_sigpy_180=False, rfbw_factor=1,undersampling_pattern=None, bin_order_center_out=True):
+                 use_sigpy_90 = False,
+                 use_sigpy_180=False, rfbw_factor=1,undersampling_pattern=None, bin_order_center_out=True,
+                 adaptive_us = False):
 
     # Generate a 2D-MSI sequence using Pypulseq
     # Sequence TSE-based
@@ -52,14 +54,27 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
     readout_time = 6.4e-3 + 2 * system.adc_dead_time
     ### Excitation pulse duration
     t_exwd = t_ex + system.rf_ringdown_time + system.rf_dead_time
+    t_exwd = round(t_exwd /1e-5) * 1e-5
     # 3. Make sequence components ------------------------------------------------------
     ## RF pulses
     rfbw = bin_width * rfbw_factor
     ### 90 deg pulse (+y')
     rf_ex_phase = np.pi / 2
     flip_ex = fa_exc * np.pi / 180
-    rf_ex, g_ss, _ = make_sinc_pulse(flip_angle=flip_ex, system=system, duration=t_ex, slice_thickness=thk,
-                                     apodization=0.5, time_bw_product=t_ex*rfbw, phase_offset=rf_ex_phase, return_gz=True)
+
+    if use_sigpy_90:
+        tb = 2
+        t_ex = tb / rfbw
+        t_exwd = t_ex + system.rf_ringdown_time + system.rf_dead_time
+        t_exwd = round(t_exwd / 1e-5) * 1e-5
+        pulse = rf_ext.slr.dzrf(n=int(round(t_ex / system.rf_raster_time)), tb=tb,
+                                ptype='ex', ftype='ls', d1=0.01, d2=0.01, cancel_alpha_phs=True)
+        rf_ex, g_ss, gzr90, _ = sp.sig_2_seq(pulse=pulse, flip_angle=flip_ex, system=system, duration=t_ex,
+                                   slice_thickness=thk, phase_offset=rf_ex_phase, use='excitation',
+                                   return_gz=True, time_bw_product=rfbw * t_ex, rf_freq=0)
+    else:
+        rf_ex, g_ss, _ = make_sinc_pulse(flip_angle=flip_ex, system=system, duration=t_ex, slice_thickness=thk,
+                                         apodization=0.5, time_bw_product=t_ex*rfbw, phase_offset=rf_ex_phase, return_gz=True)
     gs_ex = make_trapezoid(channel=ch_ss, system=system, amplitude= -g_ss.amplitude, flat_time=t_exwd,
                            rise_time=ramp_time)# Note that the 90-deg SS gradient's amplitude is reversed for 2D MSI purposes!!
 
@@ -70,9 +85,9 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
     if use_sigpy_180:
         tb = 2
         t_ref = tb / rfbw
-        pulse = rf_ext.slr.dzrf(n=int(round(t_ref / system.rf_raster_time)), tb=tb, ptype='st', ftype='ls',
+        pulse = rf_ext.slr.dzrf(n=int(round(t_ref / system.rf_raster_time)), tb=tb, ptype='se', ftype='ls',
                                 d1=0.01, d2=0.01, cancel_alpha_phs=True)
-        rf_ref, gz, gzr, _ = sp.sig_2_seq(pulse=pulse, flip_angle=flip_ref, system=system, duration=t_ref,
+        rf_ref, gz, gzr180, _ = sp.sig_2_seq(pulse=pulse, flip_angle=flip_ref, system=system, duration=t_ref,
                                       slice_thickness=thk, phase_offset=rf_ref_phase,use='refocusing',
                                       return_gz=True, time_bw_product=t_ref*rfbw)
     else:
@@ -125,6 +140,7 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
 
     # Prephasing gradient in RO direction
     agr_preph = gr_acq.area / 2 + gr_spr.area
+    t_spex = round(t_spex/1e-5)*1e-5
     gr_preph = make_trapezoid(channel=ch_ro, system=system, area=agr_preph, duration=t_spex, rise_time=ramp_time)
 
     ## **Phase encoding areas**
@@ -136,23 +152,54 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
 
 
     if undersampling_pattern is not None:
-        usp = undersampling_pattern
-        pe_steps = pe_steps*usp
-        pe_steps = pe_steps[usp!=0]
-        Np = len(pe_steps)
-        n_ex = math.ceil(Np/n_echo)
-        num_zeros = n_ex*n_echo - Np
-        pe_steps = np.append(pe_steps,num_zeros*[0])
+        if adaptive_us:
+            phase_areas_list = []
+            pe_order_list = []
+            n_ex_list = []
+            for pattern in undersampling_pattern:
+                pe_steps = np.arange(1, n_echo * n_ex + 1) - 0.5 * n_echo * n_ex - 1
+
+                pe_steps = pe_steps * pattern
+                pe_steps = pe_steps[pattern != 0]
+                Np_new = len(pe_steps)
+                n_ex_new = math.ceil(Np_new / n_echo)
+                num_zeros = n_ex_new * n_echo - Np_new
+                pe_steps = np.append(pe_steps, num_zeros * [0])
+
+                if divmod(n_echo, 2)[1] == 0:  # If there is an even number of echoes
+                    pe_steps = np.roll(pe_steps, -round(n_ex_new / 2))
+                pe_order = pe_steps.reshape((n_ex_new, n_echo), order='F').T
+                phase_areas = pe_order * dk
+
+                phase_areas_list.append(phase_areas)
+                pe_order_list.append(pe_order)
+                n_ex_list.append(n_ex_new)
+                print(pe_order.shape)
+
+            # TODO this is a temporary solution, for 2 different sampling factors
+            pe_info = {'order1': pe_order_list[0], 'order2': pe_order_list[-1], 'dims': ['n_echo', 'n_ex']}
 
 
-    if divmod(n_echo, 2)[1] == 0:  # Ife there is an even number of echoes
-        pe_steps = np.roll(pe_steps, -round(n_ex / 2))
+        else:
+            usp = undersampling_pattern
+            pe_steps = pe_steps*usp
+            pe_steps = pe_steps[usp!=0]
+            Np = len(pe_steps)
+            n_ex = math.ceil(Np/n_echo)
+            num_zeros = n_ex*n_echo - Np
+            pe_steps = np.append(pe_steps,num_zeros*[0])
 
-    pe_order = pe_steps.reshape((n_ex, n_echo), order='F').T
-
-    pe_info = {'order': pe_order, 'dims': ['n_echo', 'n_ex']}
-    phase_areas = pe_order * dk
-
+            if divmod(n_echo, 2)[1] == 0:  # If there is an even number of echoes
+                pe_steps = np.roll(pe_steps, -round(n_ex / 2))
+            pe_order = pe_steps.reshape((n_ex, n_echo), order='F').T
+            pe_info = {'order': pe_order, 'dims': ['n_echo', 'n_ex']}
+            phase_areas = pe_order * dk
+    else: # Fully sampled
+        if divmod(n_echo, 2)[1] == 0:  # If there is an even number of echoes
+            pe_steps = np.roll(pe_steps, -round(n_ex / 2))
+        pe_order = pe_steps.reshape((n_ex, n_echo), order='F').T
+        pe_info = {'order': pe_order, 'dims': ['n_echo', 'n_ex']}
+        phase_areas = pe_order*dk
     # Split gradients and recombine into blocks
 
     # gs1 : ramp up of gs_ex
@@ -236,6 +283,9 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
 
     # Add building blocks to sequence
     for q in range(N_bins):
+        if adaptive_us:
+            phase_areas = phase_areas_list[q]
+            n_ex = n_ex_list[q]
         print("Adding another bin...")
         for k_ex in range(n_ex + 1):  # For each TR
             for s in range(n_slices):  # For each slice (multislice)
@@ -618,51 +668,90 @@ if __name__ == '__main__':
 # Make sequence\
 
 
-    BW_total = 7200
-    N_bins = 9
-    bin_width = BW_total / N_bins
+    # **** CHANGE THIS PART AT SCAN ******
+    #BW_total = 7200
+    #N_bins = 9
+    #bin_width = BW_total / N_bins
+    # ************************************
 
-    thk = 5e-3
     TR = 2000e-3
-    TE = 13e-3
-    FOV = 128e-3
-    N = 128
-    dur_factor = 1
+
+    FOV = 150e-3
+    N = 256
     tf = 16
     bwf = 1
     randbin = False
 
+    # Non-adaptive
     # Load undersampling pattern
-    for R in [2,3,4]:
-        mask = loadmat(f'./undersampling/optimized_us_mask_R={R}.mat')['pe_mask']
-        print(f'Making undersampling factor R={R} MSI sequence......')
-        usp = np.sum(mask,axis=0)/256
+    # for R in [2,3,4]:
+    #     mask = loadmat(f'./undersampling/optimized_us_mask_R={R}.mat')['pe_mask']
+    #     print(f'Making undersampling factor R={R} MSI sequence......')
+    #     usp = np.sum(mask,axis=0)/256
+    #
+    #     seq, bin_centers, pe_info = write_2D_MSI(N=N,FOV=FOV,enc='xyz',TR=TR,TE=TE,thk=thk,turbo_factor=tf,slice_locations=[0],
+    #                        N_bins=N_bins,bin_width=bin_width,t_ex=dur_factor*2.5e-3, t_ref=dur_factor*2e-3,
+    #                                     randomize_bin=False,use_sigpy_180=False, rfbw_factor=bwf,
+    #                                     undersampling_pattern=usp, bin_order_center_out=True)
+    #     print(f"Done with R={R}")
+    #     # Check sequence
+    #     print(seq.test_report())
+    #     # Plot
+    #     seq.plot(time_range=[0,TR])
+    #     print(pe_info['order'])
+    #     # Save
+    #     seq.write(f'2D_CS_MSI_R={R}_AUG2022_TotalBW7200Hz.seq')
+    #     savemat(f'2D_CS_MSI_R={R}_info.mat',{'bin_centers': bin_centers, 'pe_order': pe_info['order'],'pe_dims':pe_info['dims']})
+    #
+    # # Adaptive
+    # maskR2 = loadmat(f'./undersampling/optimized_us_mask_R={2}.mat')['pe_mask']
+    # maskR4 = loadmat(f'./undersampling/optimized_us_mask_R={4}.mat')['pe_mask']
+    #
+    # print(f'Making undersampling factor R={3} adaptive MSI sequence......')
+    # uspR2 = np.sum(maskR2,axis=0)/256
+    # uspR4 = np.sum(maskR4,axis=0)/256
+    # usp_list = [uspR2,uspR2,uspR2,uspR4,uspR4,uspR4,uspR4,uspR4,uspR4]
+    #
+    # seq, bin_centers, pe_info = write_2D_MSI(N=N,FOV=FOV,enc='xyz',TR=TR,TE=TE,thk=thk,turbo_factor=tf,slice_locations=[0],
+    #                    N_bins=N_bins,bin_width=bin_width,t_ex=dur_factor*2.5e-3, t_ref=dur_factor*2e-3,
+    #                                 randomize_bin=False,use_sigpy_180=False, rfbw_factor=bwf,
+    #                                 undersampling_pattern=usp_list, bin_order_center_out=True,adaptive_us=True)
+    # print(f"Done with R={3} adaptive")
+    # # Check sequence
+    # print(seq.test_report())
+    # # Plot
+    # seq.plot(time_range=[0,TR])
+    # #print(pe_info['order'])
+    # # Save
+    # seq.write(f'2D_CS_MSI_R={3}adaptive_SEP2022_TotalBW7200Hz.seq')
+    # savemat(f'2D_CS_MSI_R={3}adaptive_info.mat',{'bin_centers': bin_centers, 'pe_order_1': pe_info['order1'],
+    #                                              'pe_order_2': pe_info['order2'], 'pe_dims':pe_info['dims']})
 
-        seq, bin_centers, pe_info = write_2D_MSI(N=N,FOV=FOV,enc='xyz',TR=TR,TE=TE,thk=thk,turbo_factor=tf,slice_locations=[0],
-                           N_bins=N_bins,bin_width=bin_width,t_ex=dur_factor*2.5e-3, t_ref=dur_factor*2e-3,
-                                        randomize_bin=False,use_sigpy_180=False, rfbw_factor=bwf,
-                                        undersampling_pattern=usp, bin_order_center_out=True)
-        print(f"Done with R={R}")
-        # Check sequence
-        print(seq.test_report())
-        # Plot
-        seq.plot(time_range=[0,TR])
-        print(pe_info['order'])
-        # Save
-        seq.write(f'2D_CS_MSI_R={R}_AUG2022_TotalBW7200Hz.seq')
-        savemat(f'2D_CS_MSI_R={R}_info.mat',{'bin_centers': bin_centers, 'pe_order': pe_info['order'],'pe_dims':pe_info['dims']})
 
+    # 2, 15 e-3
+    # 4, 25 e-3
+    # Make sure loc works!
+    dur_factor = 1 #try 2x dur and see if bandwidth is improved
+    TE = 50e-3
+    thk = 3e-3
+    loc = 5e-3
 
+    # 2400/9 or 800/9
+    N_bins = 9
+    bin_width_each = 800/9
 
     # # Wide BW probe
-    # seq, bin_centers, pe_info = write_2D_MSI(N=128, FOV=0.128, enc='xyz', TR=2000e-3, TE=13e-3, thk=5e-3, turbo_factor=16,
-    #                                          slice_locations=[0],
-    #                                          N_bins=19, bin_width=15200/19, t_ex=dur_factor * 2.5e-3,
-    #                                          t_ref=dur_factor * 2e-3,
-    #                                          randomize_bin=False, use_sigpy_180=False, rfbw_factor=bwf,
-    #                                          undersampling_pattern=None, bin_order_center_out=True)
-    #
-    # print(seq.test_report())
-    # print(pe_info['order'])
-    # seq.write('2D_MSI_wide_BW_19bins_N128_Aug2022.seq')
-    # savemat('n128_pe_order.mat',pe_info)
+    seq, bin_centers, pe_info = write_2D_MSI(N=N, FOV=FOV, enc='xyz', TR=TR, TE=TE, thk=thk, turbo_factor=16,
+                                         slice_locations=[loc],
+                                         N_bins=N_bins, bin_width=bin_width_each, t_ex=dur_factor * 2.5e-3,
+                                         t_ref=dur_factor * 2e-3,
+                                         randomize_bin=False,
+                                         use_sigpy_90=False, use_sigpy_180=False, rfbw_factor=bwf,
+                                         undersampling_pattern=None, bin_order_center_out=True)
+    print(seq.test_report())
+    seq.plot(time_range=[0,6])
+    
+    seq.write(f'2DMSI_800-9_sigpy_thk{thk*1e3}_loc{loc*1e3}_TE{TE*1e3}_nonsigpy.seq')
+    #seq.write(f'2D_MSI_BW{bin_width_each*N_bins}_{N_bins}bins_RFdur{dur_factor}x_loc{loc*1e3}mm_TE{TE*1e3}ms.seq')
+    #seq.write(f'2D_MSI_BW800_9bins_FOV150_N256_1x_loc{loc*1e3}mm_092022.seq')
+    #savemat('n256_pe_order_msi_101722.mat',pe_info)
