@@ -145,7 +145,6 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
 
     ## **Phase encoding areas**
     # Number of readouts/echoes to be produced per TR
-    # TODO add in undersampling pattern
 
     n_ex = math.floor(Np / n_echo)
     pe_steps = np.arange(1, n_echo * n_ex + 1) - 0.5 * n_echo * n_ex - 1

@@ -296,4 +296,6 @@ if __name__ == "__main__":
                                       enc='xyz',spoil_area='GE_match', rf_spoil=True,
                                       slice_locs=[0],
                                         pre_block_duration=2e-3,suffix='',write=False)
+    print(seq.test_report())
     seq.plot(time_range=[0,100e-3])
+    seq.write('spgr_082922_TE5ms.seq')
