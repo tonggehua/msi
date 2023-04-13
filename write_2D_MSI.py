@@ -19,10 +19,8 @@ import matplotlib.pyplot as plt
 
 def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turbo_factor=4,
                  slice_locations=[0],N_bins=19,bin_width=800.0,t_ex=2.5e-3,t_ref=2e-3,randomize_bin=False,
-                 use_sigpy_90 = False,
-                 use_sigpy_180=False, rfbw_factor=1,undersampling_pattern=None, bin_order_center_out=True,
-                 adaptive_us = False):
-
+                 use_sigpy_90=False, use_sigpy_180=False, rfbw_factor=1,undersampling_pattern=None,
+                 bin_order_center_out=True, adaptive_us=False):
     # Generate a 2D-MSI sequence using Pypulseq
     # Sequence TSE-based
     # 1. Initialize ----------------------------------------------------------------
@@ -95,6 +93,7 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
                                     apodization=0.5, time_bw_product=t_ref*rfbw, phase_offset=rf_ref_phase, use='refocusing',
                                     return_gz=True)
 
+    plt.figure(1)
     plt.plot(rf_ref.t, np.absolute(rf_ref.signal))
     plt.plot(rf_ref.t, np.angle(rf_ref.signal))
     plt.show()
@@ -324,8 +323,6 @@ def write_2D_MSI(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turb
                 seq.add_block(delay_TR)
 
     return seq, bin_centers, pe_info
-
-
 
 
 def write_2D_MSI_informed(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=5e-3,turbo_factor=4,
@@ -564,8 +561,6 @@ def write_2D_MSI_informed(N=256,FOV=250e-3,enc='xyz',TR=2000e-3,TE=12.4e-3, thk=
                 seq.add_block(delay_TR)
 
     return seq
-
-
 
 
 def set_June_system_limits():
